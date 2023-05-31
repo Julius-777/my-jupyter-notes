@@ -1,3 +1,7 @@
+# Folders and files
+**/.DS_Store
+/PyPortfolioOpt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
