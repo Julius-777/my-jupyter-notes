@@ -1,2 +1,2 @@
 # my-jupyter-notes
-Tutorials, notes and mini-projects related to Data Science, Quant Finance &amp; SWE
+Mini-projects, notes, tutes related to Data Science, Quant Finance &amp; SWE
