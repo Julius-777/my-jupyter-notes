@@ -135,8 +135,8 @@ import matplotlib.pyplot as plt
 #         return opt, -self.update_and_run(opt)
 
 class GeneralBacktester():
-    def __init__(self, symbol, start, end, window1, window2=200, 
-                 strategy='SMA1_SMA2', short=False, tcost=0.0, tax_rate=0.3):
+    def __init__(self, symbol, start, end, window1, window2=200, strategy='SMA1_SMA2', 
+                 short=False, tcost=0.0, tax_rate=0.3, atr_window=14, atr_multiplier=3):
         self.symbol = symbol
         self.window1 = window1
         self.window2 = window2
@@ -145,6 +145,8 @@ class GeneralBacktester():
         self.strategy = strategy
         self.tcost = tcost
         self.tax_rate = tax_rate
+        self.atr_window = atr_window
+        self.atr_multiplier = atr_multiplier
         self.results = None
         self.short = short
         self.get_data()
@@ -153,14 +155,14 @@ class GeneralBacktester():
         ''' Retrieves and prepares the data.
         '''
         try:
-            raw = yf.download(self.symbol, start=self.start, end=self.end)['Adj Close'].dropna(how="any")
+            raw = yf.download(self.symbol, start=self.start, end=self.end)[['High','Low', 'Adj Close']].dropna(how="any")
         except Exception as e:
             # Handle the exception here
             print("An error occurred while downloading data:", e)
 
         raw = pd.DataFrame(raw)
         raw.rename(columns={'Adj Close': 'price'}, inplace=True)
-        raw['return'] = np.log(raw / raw.shift(1)).dropna()
+        raw['return'] = np.log(raw['price'] / raw['price'].shift(1)).dropna()
         self.data = raw
 
     def set_parameters(self, window1=None, window2=200):
@@ -188,6 +190,20 @@ class GeneralBacktester():
         SMA2 = self.data['price'].rolling(self.window2).mean()     
         return SMA1, SMA2
     
+    def ATR(self, data):
+        # Calculate ATR Trailing Stop
+        data['ATR'] = self.atr_multiplier*ta.volatility.average_true_range(data['High'], data['Low'], data['price'], self.atr_window)
+        
+        # Set initial trailing stop at entry price - ATR
+        data['trailing_stop'] = data['price'] - data['ATR']
+
+        # Identify the rows where a new position is entered
+        new_positions = data['position'].diff() != 0
+
+        # For each position, calculate the cumulative maximum of the trailing stop
+        data['trailing_stop'] = data.groupby(new_positions.cumsum()).trailing_stop.cummax()
+
+
     def run_strategy(self):
         ''' Backtests the specified trading strategy.
         '''
@@ -207,17 +223,24 @@ class GeneralBacktester():
             data['EMA1'], data['EMA2'] = self.EMA(self.window1, self.window2)
             data['position'] = np.where(data['EMA1'] > data['EMA2'], 1, n)
 
-        elif self.strategy == "EMA":
+        elif self.strategy in ["EMA", "EMA_ATR"]:
             data['EMA'] = self.EMA(self.window1, self.window2)[0]
             data['position'] = np.where(data['price'] > data['EMA'], 1, n)
 
         elif self.strategy == "RSI_SMA":
             data['RSI'], data['SMA_RSI'] = self.RSI()
             data['position'] = np.where(data['RSI'] > data['SMA_RSI'], 1, n)
-            
+        
         else:
             raise ValueError("Invalid strategy. Choose either 'EMA', 'SMA1_SMA2', 'EMA_SMA', or 'RSI_SMA'.")
 
+        # Add ATR trailing Stop (Optional)
+        if self.strategy in ["EMA_ATR", "ATR"]:
+            self.ATR(data)
+            # Close position when trailing stop is hit
+            data['position'] = np.where(data['price'] < data['trailing_stop'], 0, data['position'])
+
+        # Calcuate strategy's trade executions
         data['strategy'] = data['position'].shift(1) * data['return']
         # Add transaction costs
         data['trades'] = data.position.diff().fillna(0).abs()
@@ -279,7 +302,7 @@ class GeneralBacktester():
         self.set_parameters(int(windows[0]), int(windows[1]))
         return -self.run_strategy()[0]
 
-    def plot_results(self, after_tax=False):
+    def plot_results(self, start=None, end=None, after_tax=False):
         ''' Plots the cumulative performance of the trading strategy
         compared to the symbol.
         '''
@@ -290,23 +313,36 @@ class GeneralBacktester():
             title = '%s | Strategy - %s | wind1=%d, wind2=%d' % (self.symbol, self.strategy, self.window1, self.window2)
             plt.figure(figsize=(14,7))
             plt.subplot(2,1,1)
+            # Set Plot range
+            
+            start = self.results.index.min() if start == None else start
+            end = self.results.index.max() if end == None else end
+ 
             strategy = 'cstrategy_after_tax' if after_tax else 'cstrategy'
-            self.results[['creturns', strategy]].plot(title=title, ax=plt.gca())
+            self.results[['creturns', strategy]][start:end].plot(title=title, ax=plt.gca())
             plt.ylabel('Cumulative Returns')
 
             # Plotting the strategy indicators over the price
             plt.subplot(2,1,2)
-            self.results['price'].plot(ax=plt.gca(), alpha=0.5)
+            self.results['price'][start:end].plot(ax=plt.gca(), alpha=0.5)
             plt.ylabel('Price')
 
             if self.strategy == 'SMA1_SMA2':
-                self.results[['SMA1', 'SMA2']].plot(ax=plt.gca())
+                self.results[['SMA1', 'SMA2']][start:end].plot(ax=plt.gca())
+
             elif self.strategy == 'EMA_SMA':
-                self.results[['EMA1', 'SMA2']].plot(ax=plt.gca())
+                self.results[['EMA1', 'SMA2']][start:end].plot(ax=plt.gca())
+
             elif self.strategy == 'RSI_SMA':
-                self.results[['RSI', 'SMA_RSI']].plot(ax=plt.gca())
+                self.results[['RSI', 'SMA_RSI']][start:end].plot(ax=plt.gca())
+
             elif self.strategy == 'EMA':
-                self.results['EMA'].plot(ax=plt.gca())
+                self.results['EMA'][start:end].plot(ax=plt.gca())
+
+            elif self.strategy in ["EMA_ATR", "ATR"]:
+                self.results['EMA'][start:end].plot(ax=plt.gca())
+                self.results['trailing_stop'][start:end].plot(ax=plt.gca())
+
             else:
                 raise ValueError('Invalid strategy provided for plotting')
             
@@ -329,14 +365,14 @@ if __name__ == '__main__':
     #                             '2010-1-1', '2020-12-31')
 
     # Create a GeneralBacktester object with EMA_SMA strategy
-    smabt = GeneralBacktester('BTC-USD','2015-05-1', '2016-09-01', window1=50, window2=200, strategy='SMA1_SMA2')
+    smabt = GeneralBacktester('BTC-USD','2015-05-1', '2016-09-01', window1=50, window2=200, strategy='EMA_ATR')
     
     # Running strategy with initial parameters
     strategy_results = smabt.run_strategy()
     print("Date Range:",smabt.data.index[0], smabt.data.index[-1],"\n")
     print(f'Gross Strategy {smabt.strategy} Performance with initial parameters (wind1={smabt.window1}, wind2={smabt.window2}): {strategy_results[0]*100}%')
     print(f'Out-/Underperformance with initial parameters (wind1={smabt.window1}, wind2={smabt.window2}): {strategy_results[1]*100}%\n')
-    smabt.plot_results()
+    smabt.plot_results(start="2015", end="2016")
     # # Setting new parameters
     # smabt.set_parameters(SMA1=20, SMA2=100)
 
